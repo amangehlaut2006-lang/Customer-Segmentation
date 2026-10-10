@@ -1,244 +1,451 @@
+
+import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import tkinter as tk
+import plotly.express as px
 
-from tkinter import filedialog
+from io import BytesIO
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 
-# -----------------------------------------
-# DWM EXPERIMENT 09: IMPLEMENTATION OF
-# CLUSTERING USING K-MEANS ALGORITHM
-# -----------------------------------------
-
-print("======================================")
-print("      DATA WAREHOUSING AND MINING")
-print("       K-MEANS CLUSTERING")
-print("======================================")
-print("1. Student Performance Dataset")
-print("2. Customer Dataset")
-print("3. Import Your Own CSV Dataset")
-
-choice = input("Select dataset (1/2/3): ").strip()
-
-# Select CSV file
-root = tk.Tk()
-root.withdraw()
-root.attributes("-topmost", True)
-
-file_path = filedialog.askopenfilename(
-    title="Select Dataset CSV File",
-    filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
+st.set_page_config(
+    page_title="K-Means Clustering Dashboard",
+    page_icon="📊",
+    layout="wide"
 )
 
-root.destroy()
+st.title("📊 K-Means Clustering Dashboard")
+st.caption("Data Warehousing and Mining | Experiment 09")
 
-if not file_path:
-    raise SystemExit("No file selected.")
+st.markdown("""
+Explore datasets, identify groups using K-Means clustering,
+evaluate cluster quality, and download your results.
+""")
 
-# Read CSV, automatically detecting common delimiters
-df = pd.read_csv(file_path, sep=None, engine="python")
-df.columns = df.columns.str.strip()
+# --------------------------------------------------
+# SIDEBAR
+# --------------------------------------------------
 
-print("\nDataset loaded successfully!")
-print("Dataset shape:", df.shape)
-print("\nFirst five records:")
-print(df.head())
+st.sidebar.header("⚙️ Configuration")
 
-# -----------------------------------------
-# SELECT FEATURES FOR CLUSTERING
-# -----------------------------------------
+dataset_type = st.sidebar.selectbox(
+    "Select dataset type",
+    [
+        "Student Performance",
+        "Customer Segmentation",
+        "Custom Dataset"
+    ]
+)
 
-numeric_df = df.select_dtypes(include=np.number)
+uploaded_file = st.sidebar.file_uploader(
+    "Upload your CSV dataset",
+    type=["csv"]
+)
 
-if numeric_df.empty:
-    raise SystemExit("The dataset contains no numeric columns.")
+if uploaded_file is None:
+    st.info("Upload a CSV file from the sidebar to get started.")
 
-# Ignore numeric identifiers when possible
+    st.markdown("### Supported datasets")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.subheader("🎓 Student Performance")
+        st.write("Analyze marks, study time, absences, and other numeric features.")
+
+    with col2:
+        st.subheader("🛍️ Customer Segmentation")
+        st.write("Group customers by income, spending score, age, and other features.")
+
+    with col3:
+        st.subheader("📁 Custom Dataset")
+        st.write("Upload your own CSV containing at least two numeric features.")
+
+    st.stop()
+
+# --------------------------------------------------
+# LOAD DATA
+# --------------------------------------------------
+
+try:
+    uploaded_file.seek(0)
+    df = pd.read_csv(uploaded_file, sep=None, engine="python")
+    df.columns = df.columns.astype(str).str.strip()
+
+except Exception as e:
+    st.error(f"Unable to read the CSV file: {e}")
+    st.stop()
+
+if df.empty:
+    st.error("The uploaded dataset is empty.")
+    st.stop()
+
+if len(df) < 3:
+    st.error("Upload at least 3 rows to perform clustering.")
+    st.stop()
+
+st.success("Dataset loaded successfully!")
+
+# --------------------------------------------------
+# DATA OVERVIEW
+# --------------------------------------------------
+
+st.header("1. Dataset Overview")
+
+c1, c2, c3, c4 = st.columns(4)
+
+c1.metric("Total Records", f"{len(df):,}")
+c2.metric("Total Columns", len(df.columns))
+c3.metric("Missing Values", f"{int(df.isna().sum().sum()):,}")
+c4.metric("Duplicate Rows", f"{int(df.duplicated().sum()):,}")
+
+with st.expander("Preview dataset", expanded=True):
+    st.dataframe(df.head(20), use_container_width=True)
+
+with st.expander("Column information"):
+    info_df = pd.DataFrame({
+        "Column": df.columns,
+        "Data Type": df.dtypes.astype(str).values,
+        "Missing Values": df.isna().sum().values,
+        "Unique Values": df.nunique().values
+    })
+    st.dataframe(info_df, use_container_width=True)
+
+# --------------------------------------------------
+# PREPARE NUMERIC FEATURES
+# --------------------------------------------------
+
+st.header("2. Select Features")
+
+numeric_df = df.select_dtypes(include=np.number).copy()
+
+# Remove numeric identifiers when possible
 id_columns = [
     col for col in numeric_df.columns
-    if col.lower() in ["id", "customerid", "studentid", "student_id"]
+    if col.lower().replace(" ", "").replace("_", "")
+    in ["id", "customerid", "studentid", "recordid"]
 ]
 
 numeric_df = numeric_df.drop(columns=id_columns, errors="ignore")
 
-if numeric_df.shape[1] == 0:
-    raise SystemExit("No suitable numeric features found.")
+# Remove columns containing only missing values
+numeric_df = numeric_df.dropna(axis=1, how="all")
 
-if choice == "1":
-    # Student performance: prefer marks and study-related features
+if numeric_df.shape[1] < 2:
+    st.error(
+        "Your dataset needs at least two usable numeric columns. "
+        "Check that numeric values are stored as numbers."
+    )
+    st.stop()
+
+if dataset_type == "Student Performance":
     preferred = [
-        "G1", "G2", "G3", "math score", "reading score",
-        "writing score", "studytime", "absences"
+        "G1", "G2", "G3", "math score",
+        "reading score", "writing score",
+        "studytime", "absences"
     ]
 
-elif choice == "2":
-    # Customer segmentation: prefer income and spending
+elif dataset_type == "Customer Segmentation":
     preferred = [
-        "Annual Income (k$)", "Spending Score (1-100)",
-        "Annual Income", "Spending Score",
-        "age", "income", "spending score"
+        "Annual Income (k$)",
+        "Spending Score (1-100)",
+        "Annual Income",
+        "Spending Score",
+        "Age",
+        "age",
+        "income",
+        "spending score"
     ]
 
 else:
-    # Use numeric columns from any uploaded CSV
     preferred = []
 
-# Match columns without case sensitivity
 column_lookup = {
-    col.lower(): col for col in numeric_df.columns
+    col.lower().strip(): col
+    for col in numeric_df.columns
 }
 
-features = []
+default_features = []
+
 for name in preferred:
-    if name.lower() in column_lookup:
-        actual_name = column_lookup[name.lower()]
-        if actual_name not in features:
-            features.append(actual_name)
+    actual_name = column_lookup.get(name.lower().strip())
+    if actual_name and actual_name not in default_features:
+        default_features.append(actual_name)
 
-# Use available numeric columns if preferred ones aren't found
-if len(features) < 2:
-    features = list(numeric_df.columns[:min(5, len(numeric_df.columns))])
+if len(default_features) < 2:
+    default_features = list(numeric_df.columns[:min(5, len(numeric_df.columns))])
 
-if len(features) < 2:
-    raise SystemExit("At least two numeric features are required.")
+selected_features = st.multiselect(
+    "Choose numeric columns for clustering",
+    options=list(numeric_df.columns),
+    default=default_features
+)
 
-print("\nAvailable numeric columns:")
-for col in numeric_df.columns:
-    print("-", col)
+if len(selected_features) < 2:
+    st.warning("Select at least two numeric features.")
+    st.stop()
 
-print("\nFeatures selected for clustering:", features)
-
-# -----------------------------------------
-# DATA PREPROCESSING
-# -----------------------------------------
-
-X = numeric_df[features].copy()
-
-# Replace infinite values with missing values
+# Convert infinite values into missing values
+X = numeric_df[selected_features].copy()
 X = X.replace([np.inf, -np.inf], np.nan)
 
-# Fill missing values using column medians
-imputer = SimpleImputer(strategy="median")
-X_imputed = imputer.fit_transform(X)
+# Remove rows where every selected feature is missing
+valid_rows = X.notna().any(axis=1)
 
-# Standardize features
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X_imputed)
+X = X.loc[valid_rows]
+working_df = df.loc[valid_rows].copy()
 
-# -----------------------------------------
-# APPLY K-MEANS CLUSTERING
-# -----------------------------------------
+if len(X) < 3:
+    st.error("Not enough usable records after removing empty rows.")
+    st.stop()
 
-k = int(input("\nEnter number of clusters (e.g. 3): "))
+# --------------------------------------------------
+# PREPROCESSING
+# --------------------------------------------------
 
-if k < 2 or k >= len(df):
-    raise SystemExit("Choose k >= 2 and smaller than the row count.")
+try:
+    imputer = SimpleImputer(strategy="median")
+    X_imputed = imputer.fit_transform(X)
 
-model = KMeans(
-    n_clusters=k,
-    random_state=42,
-    n_init=10
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_imputed)
+
+except Exception as e:
+    st.error(f"Data preprocessing failed: {e}")
+    st.stop()
+
+st.caption(
+    f"Using {len(X)} records and {len(selected_features)} features. "
+    "Missing values are filled with column medians, then features are standardized."
 )
 
-df["Cluster"] = model.fit_predict(X_scaled)
+# --------------------------------------------------
+# CLUSTER SETTINGS
+# --------------------------------------------------
 
-print("\nClustering completed successfully!")
-print("\nCluster-wise record counts:")
-print(df["Cluster"].value_counts().sort_index())
+st.header("3. Configure K-Means")
 
-# -----------------------------------------
+max_k = min(10, len(X) - 1)
+
+k = st.slider(
+    "Number of clusters (K)",
+    min_value=2,
+    max_value=max_k,
+    value=min(3, max_k)
+)
+
+if st.button("🚀 Run Clustering", type="primary"):
+    st.session_state["run_clustering"] = True
+
+if not st.session_state.get("run_clustering", False):
+    st.info("Choose your features and K, then click Run Clustering.")
+    st.stop()
+
+# --------------------------------------------------
+# APPLY K-MEANS
+# --------------------------------------------------
+
+try:
+    model = KMeans(
+        n_clusters=k,
+        random_state=42,
+        n_init=10
+    )
+
+    labels = model.fit_predict(X_scaled)
+
+except Exception as e:
+    st.error(f"Clustering failed: {e}")
+    st.stop()
+
+working_df["Cluster"] = labels
+
+# --------------------------------------------------
 # CLUSTER QUALITY
-# -----------------------------------------
+# --------------------------------------------------
 
-if len(set(df["Cluster"])) > 1 and len(df) > k:
-    score = silhouette_score(X_scaled, df["Cluster"])
-    print("\nSilhouette Score:", round(score, 4))
-    print("(A higher score generally indicates better-separated clusters.)")
+st.header("4. Clustering Results")
 
-# -----------------------------------------
-# VISUALIZATION
-# -----------------------------------------
+unique_clusters = len(np.unique(labels))
 
-# Use the first two selected features for plotting
-plot_data = pd.DataFrame(X_imputed, columns=features)
-plot_data["Cluster"] = df["Cluster"].to_numpy()
+if unique_clusters > 1 and unique_clusters < len(labels):
+    score = silhouette_score(X_scaled, labels)
+else:
+    score = None
 
-plt.figure(figsize=(10, 6))
+r1, r2, r3 = st.columns(3)
 
-sns.scatterplot(
-    data=plot_data,
-    x=features[0],
-    y=features[1],
-    hue="Cluster",
-    palette="viridis",
-    s=75,
-    alpha=0.8
+r1.metric("Clusters Found", unique_clusters)
+r2.metric("Records Clustered", f"{len(labels):,}")
+r3.metric(
+    "Silhouette Score",
+    f"{score:.4f}" if score is not None else "Unavailable"
 )
 
-plt.title("K-Means Clustering - " +
-          ("Student Performance" if choice == "1"
-           else "Customer Segmentation" if choice == "2"
-           else "Custom Dataset"))
+if score is not None:
+    if score >= 0.5:
+        st.success("The clusters are reasonably well separated.")
+    elif score >= 0.25:
+        st.info("The clusters show some separation, with possible overlap.")
+    else:
+        st.warning(
+            "The clusters overlap substantially. Try different features or K values."
+        )
 
-plt.xlabel(features[0])
-plt.ylabel(features[1])
-plt.legend(title="Cluster")
-plt.tight_layout()
-plt.show()
+# --------------------------------------------------
+# CLUSTER DISTRIBUTION
+# --------------------------------------------------
 
-# -----------------------------------------
+st.header("5. Cluster Distribution")
+
+cluster_counts = (
+    working_df["Cluster"]
+    .value_counts()
+    .sort_index()
+    .rename_axis("Cluster")
+    .reset_index(name="Records")
+)
+
+left, right = st.columns(2)
+
+with left:
+    fig = px.bar(
+        cluster_counts,
+        x="Cluster",
+        y="Records",
+        color="Cluster",
+        title="Records in Each Cluster",
+        text="Records",
+        color_continuous_scale="Viridis"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+with right:
+    fig = px.pie(
+        cluster_counts,
+        names="Cluster",
+        values="Records",
+        title="Cluster Proportions",
+        hole=0.4
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+# --------------------------------------------------
+# FEATURE SCATTER PLOT
+# --------------------------------------------------
+
+st.header("6. Feature-Based Visualization")
+
+plot_df = pd.DataFrame(
+    X_imputed,
+    columns=selected_features,
+    index=working_df.index
+)
+
+plot_df["Cluster"] = labels.astype(str)
+
+x_feature = st.selectbox(
+    "X-axis feature",
+    selected_features,
+    index=0
+)
+
+y_feature = st.selectbox(
+    "Y-axis feature",
+    selected_features,
+    index=1
+)
+
+fig = px.scatter(
+    plot_df,
+    x=x_feature,
+    y=y_feature,
+    color="Cluster",
+    title=f"Clusters: {x_feature} vs {y_feature}",
+    hover_data=selected_features,
+    template="plotly_white"
+)
+
+st.plotly_chart(fig, use_container_width=True)
+
+# --------------------------------------------------
 # PCA VISUALIZATION
-# -----------------------------------------
+# --------------------------------------------------
 
-# Project all selected features into two dimensions
+st.header("7. PCA Visualization")
+
 pca = PCA(n_components=2)
 X_pca = pca.fit_transform(X_scaled)
 
-plt.figure(figsize=(10, 6))
+pca_df = pd.DataFrame({
+    "Principal Component 1": X_pca[:, 0],
+    "Principal Component 2": X_pca[:, 1],
+    "Cluster": labels.astype(str)
+})
 
-sns.scatterplot(
-    x=X_pca[:, 0],
-    y=X_pca[:, 1],
-    hue=df["Cluster"],
-    palette="viridis",
-    s=65,
-    alpha=0.8
+fig = px.scatter(
+    pca_df,
+    x="Principal Component 1",
+    y="Principal Component 2",
+    color="Cluster",
+    title="K-Means Clusters in Two-Dimensional PCA Space",
+    template="plotly_white"
 )
 
-plt.title("K-Means Clustering - PCA Visualization")
-plt.xlabel("Principal Component 1")
-plt.ylabel("Principal Component 2")
-plt.legend(title="Cluster")
-plt.tight_layout()
-plt.show()
+st.plotly_chart(fig, use_container_width=True)
 
-print(
-    "\nPCA variance explained:",
-    round(sum(pca.explained_variance_ratio_) * 100, 2),
-    "%"
+variance = sum(pca.explained_variance_ratio_) * 100
+
+st.metric("Variance Explained by Two Components", f"{variance:.2f}%")
+
+# --------------------------------------------------
+# CLUSTER SUMMARY
+# --------------------------------------------------
+
+st.header("8. Cluster Summary")
+
+summary = (
+    plot_df
+    .assign(Cluster=labels)
+    .groupby("Cluster")[selected_features]
+    .mean()
+    .round(2)
 )
 
-# -----------------------------------------
-# DISPLAY CLUSTER SUMMARY
-# -----------------------------------------
+st.dataframe(summary, use_container_width=True)
 
-print("\nCluster Summary:")
-print(df.groupby("Cluster")[features].mean().round(2))
+# --------------------------------------------------
+# CLUSTERED DATA AND DOWNLOAD
+# --------------------------------------------------
 
-# -----------------------------------------
-# SAVE RESULTS
-# -----------------------------------------
+st.header("9. Export Results")
 
-output_path = file_path.rsplit(".", 1)[0] + "_clustered.csv"
-df.to_csv(output_path, index=False)
+st.dataframe(working_df, use_container_width=True)
 
-print("\nClustered dataset saved to:")
-print(output_path)
+csv_data = working_df.to_csv(index=False).encode("utf-8")
 
-print("\nExperiment completed successfully!")
+st.download_button(
+    label="⬇️ Download Clustered CSV",
+    data=csv_data,
+    file_name="clustered_results.csv",
+    mime="text/csv"
+)
+
+# Download cluster summary
+summary_csv = summary.to_csv().encode("utf-8")
+
+st.download_button(
+    label="⬇️ Download Cluster Summary",
+    data=summary_csv,
+    file_name="cluster_summary.csv",
+    mime="text/csv"
+)
+
+st.success("Clustering analysis completed successfully!")
+
+st.caption(
+    "DWM Experiment 09 | K-Means Clustering | "
+    "Built with Python, Streamlit, Pandas, Scikit-learn and Plotly"
+)
